@@ -293,6 +293,51 @@ function VideoTile({ stream, name, isPinned, onPin, videoOff, audioOff }) {
   );
 }
 
+/* ─── Lobby demo: hand skeleton + a live caption assembling word by word ────── */
+const DEMO_WORDS = ['Hello', 'How', 'You'];
+const DEMO_SENTENCE = 'Hello, how are you?';
+function LobbyDemo() {
+  const [step, setStep] = useState(0); // 0..3 words shown, 4 = full sentence
+  useEffect(() => {
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) { setStep(4); return; }
+    const t = setInterval(() => setStep(s => (s + 1) % 6), 1100);
+    return () => clearInterval(t);
+  }, []);
+  const shown = Math.min(step, 3);
+  return (
+    <div className="tr-lobby-demo" aria-hidden="true">
+      <div className="tr-lobby-hand">
+        <span className="tr-lobby-hand-glow" />
+        <HandLandmarks size={150} color="#F3EFE8" accent="#FF8A4C" />
+      </div>
+      <div className="tr-lobby-caption">
+        <p className="tr-lobby-caption-label">
+          <span className="status-dot" data-live="true" style={{ color: '#FF8A4C' }} /> Live caption
+        </p>
+        <div className="tr-lobby-caption-body">
+          <AnimatePresence mode="wait">
+            {step >= 4 ? (
+              <motion.p key="sentence" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.35 }} className="tr-lobby-sentence">
+                {DEMO_SENTENCE}
+              </motion.p>
+            ) : (
+              <motion.div key="words" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="tr-lobby-words">
+                {DEMO_WORDS.slice(0, shown).map((w, i) => (
+                  <motion.span key={w} initial={{ opacity: 0, scale: 0.7, y: 6 }} animate={{ opacity: 1, scale: 1, y: 0 }} transition={{ type: 'spring', stiffness: 420, damping: 22 }} className="tr-lobby-word" data-current={i === shown - 1}>
+                    {w}
+                  </motion.span>
+                ))}
+                {shown < 3 && <span className="tr-lobby-cursor" />}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── VideoGrid ─────────────────────────────────────────────────────────────── */
 // Auto-adjusting grid for remote peers (local video is always a separate PiP).
 // When a peer is pinned: featured (big) + strip (others on right).
@@ -602,7 +647,108 @@ export default function Translator() {
     }
   }, [callStatus, remotePeers.size]);
 
+  // ── Full-screen focus mode ────────────────────────────────────────────────────
+  // The stage becomes a fixed full-viewport layer with only the essentials. The
+  // browser Fullscreen API is used where available (hides browser chrome);
+  // iPhone Safari has no document fullscreen, so the CSS layer alone is used there.
+  const [isFull, setIsFull]   = useState(false);
+  const [isIdle, setIsIdle]   = useState(false);
+  const [fsChat, setFsChat]   = useState(null);   // last incoming chat, shown briefly in full screen
+  const apiFullRef = useRef(false);
+  const idleTimerRef = useRef(null);
+
+  const exitFull = useCallback(() => {
+    setIsFull(false);
+    setIsIdle(false);
+    const d = document;
+    if (apiFullRef.current && (d.fullscreenElement || d.webkitFullscreenElement)) {
+      (d.exitFullscreen || d.webkitExitFullscreen)?.call(d)?.catch?.(() => {});
+    }
+    apiFullRef.current = false;
+  }, []);
+
+  const enterFull = useCallback(() => {
+    setIsFull(true);
+    const el = document.documentElement;
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) {
+      try {
+        const r = req.call(el, { navigationUI: 'hide' });
+        apiFullRef.current = true;
+        r?.catch?.(() => { apiFullRef.current = false; });
+      } catch { apiFullRef.current = false; }
+    }
+  }, []);
+
+  const toggleFull = useCallback(() => (isFull ? exitFull() : enterFull()), [isFull, exitFull, enterFull]);
+
+  // Leaving browser fullscreen (Esc / system gesture) also leaves focus mode
+  useEffect(() => {
+    const onChange = () => {
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+      if (!fsEl && apiFullRef.current) { apiFullRef.current = false; setIsFull(false); setIsIdle(false); }
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    document.addEventListener('webkitfullscreenchange', onChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onChange);
+      document.removeEventListener('webkitfullscreenchange', onChange);
+    };
+  }, []);
+
+  // Keyboard: F toggles, Esc exits
+  useEffect(() => {
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if ((e.key === 'f' || e.key === 'F') && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); toggleFull(); }
+      else if (e.key === 'Escape' && isFull) exitFull();   // also leaves browser fullscreen if still active
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isFull, toggleFull, exitFull]);
+
+  // Auto-hide the controls after 3 s without pointer / touch / key activity
+  const pokeControls = useCallback(() => {
+    setIsIdle(false);
+    clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = setTimeout(() => setIsIdle(true), 3000);
+  }, []);
+  useEffect(() => {
+    if (!isFull) { clearTimeout(idleTimerRef.current); setIsIdle(false); return; }
+    pokeControls();
+    const evs = ['pointermove', 'pointerdown', 'keydown', 'touchstart'];
+    evs.forEach(ev => window.addEventListener(ev, pokeControls, { passive: true }));
+    // The app shell / page must not scroll underneath the full-screen layer
+    document.documentElement.classList.add('tr-fullscreen');
+    return () => {
+      clearTimeout(idleTimerRef.current);
+      evs.forEach(ev => window.removeEventListener(ev, pokeControls));
+      document.documentElement.classList.remove('tr-fullscreen');
+    };
+  }, [isFull, pokeControls]);
+
+  // Make sure focus mode never outlives the page
+  useEffect(() => () => {
+    document.documentElement.classList.remove('tr-fullscreen');
+    if (apiFullRef.current && (document.fullscreenElement || document.webkitFullscreenElement)) {
+      (document.exitFullscreen || document.webkitExitFullscreen)?.call(document)?.catch?.(() => {});
+    }
+  }, []);
+
+  // Incoming chat can't be read in the hidden panel → show it on the stage for a few seconds
+  useEffect(() => {
+    if (!isFull || !peerChat) return;
+    setFsChat(peerChat);
+    const t = setTimeout(() => setFsChat(null), 6000);
+    return () => clearTimeout(t);
+  }, [peerChat, isFull]);
+
+  // The lobby has no stage — never stay in focus mode there
+  useEffect(() => { if (lobbyVisible && isFull) exitFull(); }, [lobbyVisible, isFull, exitFull]);
+
   const handleLeaveRoom = () => {
+    if (isFull) exitFull();
     leaveRoom();
     setInRoom(false);
     setRoomInput('');
@@ -789,20 +935,20 @@ export default function Translator() {
             className="tr-lobby"
           >
             <div className="tr-lobby-art">
-              <span className="eyebrow" style={{ color: 'var(--stage-muted)' }}>Group call</span>
-              <h2 style={{ fontFamily: 'var(--font-serif)', fontSize: 'clamp(2.2rem, 3.6vw, 3rem)', lineHeight: 1, marginTop: 18, color: 'var(--stage-text)' }}>
-                Sign together,<br /><em style={{ color: '#FF8A4C' }}>see every word.</em>
-              </h2>
-              <ul className="tr-lobby-list" style={{ listStyle: 'none', marginTop: 28, display: 'grid', gap: 12, color: 'var(--stage-muted)', fontSize: '0.86rem' }}>
-                {['Up to 6 people per room', 'Live ISL captions shared with everyone', 'Chat and suggestions alongside video'].map(t => (
-                  <li key={t} style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                    <CheckCircle2 size={15} style={{ color: '#FF8A4C', flexShrink: 0 }} /> {t}
-                  </li>
-                ))}
-              </ul>
-              <div className="tr-lobby-hand" style={{ position: 'absolute', right: -10, bottom: -30, opacity: 0.9 }}>
-                <HandLandmarks size={180} color="#F3EFE8" accent="#FF8A4C" />
+              <div>
+                <span className="eyebrow" style={{ color: 'var(--stage-muted)' }}>Group call</span>
+                <h2 style={{ fontFamily: 'var(--font-serif)', fontSize: 'clamp(2.2rem, 3.6vw, 3rem)', lineHeight: 1, marginTop: 18, color: 'var(--stage-text)' }}>
+                  Sign together,<br /><em style={{ color: '#FF8A4C' }}>see every word.</em>
+                </h2>
+                <ul className="tr-lobby-list">
+                  {['Up to 6 people per room', 'Live ISL captions shared with everyone', 'Chat and suggestions alongside video'].map(t => (
+                    <li key={t}>
+                      <CheckCircle2 size={15} style={{ color: '#FF8A4C', flexShrink: 0 }} /> {t}
+                    </li>
+                  ))}
+                </ul>
               </div>
+              <LobbyDemo />
             </div>
 
             <div className="tr-lobby-form">
@@ -875,7 +1021,7 @@ export default function Translator() {
                 {joining ? <Loader2 size={16} className="spin" /> : <Phone size={16} />} {joining ? 'Joining…' : 'Join call'}
               </button>
               <p style={{ fontSize: '0.74rem', color: 'var(--text-faint)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Lock size={11} /> You can switch your camera and mic on or off any time during the call.
+                <Lock size={11} /> You can change camera and mic any time during the call.
               </p>
             </div>
           </motion.div>
@@ -885,7 +1031,12 @@ export default function Translator() {
         <div className="tr-body">
 
           {/* STAGE */}
-          <div ref={stageRef} className={`stage tr-stage ${!inCall ? 'viewfinder' : ''}`} data-call={inCall}>
+          <div
+            ref={stageRef}
+            className={`stage tr-stage ${!inCall ? 'viewfinder' : ''} ${isFull ? 'tr-stage-full' : ''}`}
+            data-call={inCall} data-idle={isFull && isIdle}
+            role={isFull ? 'dialog' : undefined} aria-modal={isFull || undefined} aria-label={isFull ? 'Full-screen translator' : undefined}
+          >
 
             {inCall ? (
               remotePeers.size > 0 ? (
@@ -993,6 +1144,27 @@ export default function Translator() {
               </motion.div>
             )}
 
+            {/* Full screen: partner's live captions + incoming chat (the side panel is hidden) */}
+            {isFull && inCall && (
+              <div className="tr-fs-peer">
+                <AnimatePresence>
+                  {peerSentence && isAslActive && (
+                    <motion.div key="peer-caption" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="tr-fs-bubble">
+                      <span className="tr-fs-who">{peerName || 'Partner'} is signing</span>
+                      <span className="tr-fs-text">{peerSentence}</span>
+                    </motion.div>
+                  )}
+                  {fsChat && (
+                    <motion.div key={fsChat.id} initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="tr-fs-bubble tr-fs-chat">
+                      <MessageSquare size={13} />
+                      <span className="tr-fs-who">{fsChat.sender || peerName || 'Partner'}</span>
+                      <span className="tr-fs-text">{fsChat.text}</span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            )}
+
             {/* Caption */}
             <AnimatePresence>
               {(sentence.length > 0 || translatedText) && isAslActive && (
@@ -1060,8 +1232,11 @@ export default function Translator() {
               <CtrlBtn state={isAslActive ? 'accent' : undefined} title={isAslActive ? 'Hide ISL captions' : 'Show ISL captions'} onClick={() => setIsAslActive(!isAslActive)}>
                 <Sparkles size={18} />
               </CtrlBtn>
-              <CtrlBtn state={isSidebarOpen ? 'on' : undefined} title="Transcript panel" onClick={handlePanelToggle}>
+              <CtrlBtn state={isSidebarOpen ? 'on' : undefined} title="Transcript panel" onClick={handlePanelToggle} className="dock-panel">
                 <PanelRight size={18} />
+              </CtrlBtn>
+              <CtrlBtn state={isFull ? 'on' : undefined} title={isFull ? 'Exit full screen (F)' : 'Full screen (F)'} onClick={toggleFull} className="dock-full">
+                {isFull ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
               </CtrlBtn>
               {inCall && (
                 <>
@@ -1283,7 +1458,39 @@ export default function Translator() {
           display: grid; grid-template-columns: 1fr 1fr; width: 100%; max-width: 920px; overflow: hidden;
           border-radius: var(--r-xl); border: 1px solid var(--border-hover); background: var(--bg-panel); box-shadow: var(--shadow-lg);
         }
-        .tr-lobby-art { position: relative; overflow: hidden; padding: 40px; background: var(--stage); min-height: 420px; }
+        .tr-lobby-art {
+          position: relative; overflow: hidden; padding: 40px; background: var(--stage); min-height: 420px;
+          display: flex; flex-direction: column; justify-content: space-between; gap: 32px;
+        }
+        .tr-lobby-list { list-style: none; margin-top: 28px; display: grid; gap: 12px; color: var(--stage-muted); font-size: 0.86rem; }
+        .tr-lobby-list li { display: flex; gap: 10px; align-items: center; }
+        .tr-lobby-demo { display: flex; align-items: flex-end; gap: 22px; }
+        .tr-lobby-hand { position: relative; flex-shrink: 0; width: 150px; padding: 12px 6px 0; }
+        .tr-lobby-hand svg { display: block; position: relative; }
+        .tr-lobby-hand-glow {
+          position: absolute; left: 50%; top: 55%; width: 190px; height: 190px; transform: translate(-50%, -50%);
+          background: radial-gradient(circle, rgba(255,138,76,0.22) 0%, rgba(255,138,76,0.06) 45%, transparent 70%);
+          pointer-events: none;
+        }
+        .tr-lobby-caption {
+          flex: 1; min-width: 0; margin-bottom: 14px; padding: 14px 16px; border-radius: 16px;
+          background: rgba(243,239,232,0.05); border: 1px solid var(--stage-border);
+          backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+        }
+        .tr-lobby-caption-label {
+          display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 0.6rem;
+          letter-spacing: 0.16em; text-transform: uppercase; color: var(--stage-muted); margin-bottom: 10px;
+        }
+        .tr-lobby-caption-body { min-height: 34px; display: flex; align-items: center; }
+        .tr-lobby-words { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+        .tr-lobby-word {
+          display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border-radius: 8px; font-size: 0.8rem; font-weight: 500;
+          color: var(--stage-text); background: rgba(243,239,232,0.08); border: 1px solid var(--stage-border);
+        }
+        .tr-lobby-word[data-current="true"] { color: #FF8A4C; background: rgba(255,138,76,0.14); border-color: rgba(255,138,76,0.4); }
+        .tr-lobby-cursor { width: 2px; height: 18px; background: #FF8A4C; border-radius: 2px; animation: hc-blink-lobby 1s steps(2) infinite; }
+        @keyframes hc-blink-lobby { 50% { opacity: 0; } }
+        .tr-lobby-sentence { font-family: var(--font-serif); font-size: 1.45rem; line-height: 1.15; color: var(--stage-text); }
         .tr-lobby-form { padding: 40px; display: flex; flex-direction: column; gap: 20px; justify-content: center; }
         /* ── Stage furniture ─────────────────────────────────────────────── */
         .tr-dock { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 30; max-width: calc(100% - 16px); }
@@ -1312,6 +1519,43 @@ export default function Translator() {
         .vtile-video { width: 100%; height: 100%; object-fit: cover; transition: opacity .2s ease; }
         .tr-sugg-chip { min-height: 30px; }
 
+        /* ── Full-screen focus mode ───────────────────────────────────────── */
+        html.tr-fullscreen .app-main { z-index: 60; }            /* above the sidebar rail */
+        html.tr-fullscreen .app-scroll { overflow: hidden; }
+        .tr-stage-full {
+          position: fixed !important; inset: 0; z-index: 1000; width: 100vw; height: 100vh; height: 100dvh;
+          min-height: 0 !important; border-radius: 0 !important; border: 0 !important; box-shadow: none !important;
+        }
+        .tr-stage-full.viewfinder::before, .tr-stage-full.viewfinder::after { display: none; }
+        .tr-stage-full .dock-panel, .tr-stage-full .dock-share, .tr-stage-full .dock-invite { display: none !important; }
+        .tr-stage-full .tr-dock { bottom: max(16px, env(safe-area-inset-bottom)); }
+        .tr-stage-full .tr-caption { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 76px); max-width: 900px; }
+        .tr-stage-full .tr-chips { top: max(16px, env(safe-area-inset-top)); left: 16px; }
+        .tr-stage-full .tr-pip { top: max(16px, env(safe-area-inset-top)); }
+        .tr-stage-full .tr-dock, .tr-stage-full .tr-chips { transition: opacity .35s ease, transform .35s ease; }
+        .tr-stage-full[data-idle="true"] { cursor: none; }
+        .tr-stage-full[data-idle="true"] .tr-dock { opacity: 0; pointer-events: none; transform: translateX(-50%) translateY(12px); }
+        .tr-stage-full[data-idle="true"] .tr-chips { opacity: 0; pointer-events: none; }
+        .tr-stage-full[data-idle="true"] .tr-fs-peer { top: max(16px, env(safe-area-inset-top)); }
+        .tr-stage-full[data-idle="true"] .tr-caption { bottom: max(20px, env(safe-area-inset-bottom)); transition: bottom .35s ease; }
+        .tr-fs-peer {
+          position: absolute; top: calc(max(16px, env(safe-area-inset-top)) + 40px); left: 16px; z-index: 25;
+          width: min(560px, calc(100% - 220px)); display: grid; gap: 8px; pointer-events: none; transition: top .35s ease;
+        }
+        .tr-fs-bubble {
+          display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 10px 14px; border-radius: 14px;
+          background: rgba(11,10,9,0.62); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+          border: 1px solid var(--stage-border); color: #F3EFE8;
+        }
+        .tr-fs-chat { align-items: center; border-color: rgba(138,180,255,0.35); }
+        .tr-fs-chat svg { color: #8AB4FF; flex-shrink: 0; }
+        .tr-fs-who { font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--stage-muted); }
+        .tr-fs-text { font-family: var(--font-serif); font-size: 1.2rem; line-height: 1.2; }
+        @media (max-width: 640px) {
+          .tr-fs-peer { width: calc(100% - 120px); left: 12px; top: 48px; }
+          .tr-fs-text { font-size: 1rem; }
+        }
+
         /* ── Lobby preview + pre-call toggles ────────────────────────────── */
         .tr-preview { position: relative; aspect-ratio: 16 / 10; border-radius: 16px; overflow: hidden; background: var(--stage); border: 1px solid var(--border-hover); }
         .tr-preview-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); transition: opacity .2s ease; }
@@ -1333,13 +1577,37 @@ export default function Translator() {
         .spin { animation: spin 0.9s linear infinite; }
         .btn-primary:disabled { opacity: 0.7; cursor: progress; }
 
+        /* Desktop: the whole lobby card fits in the viewport without scrolling */
+        @media (min-width: 1001px) {
+          .tr-lobby-wrap { padding-top: 16px; padding-bottom: 16px; }
+          .tr-lobby-form { padding: 32px 36px; gap: 16px; }
+          .tr-lobby-art { padding: 36px; min-height: 0; }
+          .tr-preview { aspect-ratio: auto; height: clamp(140px, calc(100dvh - 600px), 240px); }
+          .tr-lobby-form .input-field { height: 44px !important; }
+          .tr-lobby-form input.mono { height: 50px !important; }
+          .tr-lobby-form h3 { font-size: 1.8rem !important; }
+        }
+        @media (min-width: 1001px) and (max-height: 760px) {
+          .tr-lobby-form { padding-top: 26px; padding-bottom: 24px; gap: 14px; }
+          .tr-lobby-list { margin-top: 18px; gap: 8px; }
+          .tr-lobby-hand { width: 120px; }
+          .tr-lobby-hand svg { width: 120px; height: 132px; }
+        }
         @media (max-width: 1000px) {
           .tr-root { overflow-y: auto; height: auto; }
           .tr-body { flex-direction: column; }
           .tr-stage { min-height: min(68vh, 680px); min-height: min(68dvh, 680px); }
           .tr-panel { width: 100%; max-height: none; scroll-margin-top: 64px; }
           .tr-lobby { grid-template-columns: 1fr; }
-          .tr-lobby-art { min-height: 220px; }
+          .tr-lobby-art { min-height: 0; }
+          .tr-lobby-demo { max-width: 520px; }
+          .tr-preview { max-height: 300px; width: 100%; }
+        }
+        /* Tablets: headline + features on the left, hand on the right — a compact banner */
+        @media (min-width: 641px) and (max-width: 1000px) {
+          .tr-lobby-art { flex-direction: row; align-items: center; justify-content: space-between; padding: 32px 36px; }
+          .tr-lobby-caption { display: none; }
+          .tr-lobby-demo { flex-shrink: 0; }
         }
         @media (max-width: 640px) {
           .tr-hide-sm { display: none !important; }
@@ -1350,7 +1618,7 @@ export default function Translator() {
           .tr-lobby-wrap { padding: 12px 10px 24px; align-items: flex-start; }
           .tr-lobby-art { min-height: 0; padding: 22px 22px 20px; }
           .tr-lobby-art h2 { font-size: 1.9rem !important; margin-top: 10px !important; }
-          .tr-lobby-list, .tr-lobby-hand { display: none !important; }
+          .tr-lobby-list, .tr-lobby-demo { display: none !important; }
           .tr-lobby-form { padding: 20px; gap: 16px; }
           .tr-dock { bottom: 10px; }
           .dock { gap: 4px !important; padding: 5px !important; border-radius: 18px !important; }
