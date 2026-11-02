@@ -43,7 +43,7 @@ export default function HandLandmarks({ size = 200, color = 'var(--text-primary)
             {tip && live && (
               <motion.circle
                 cx={x} cy={y} r={4} fill="none" stroke={accent} strokeWidth={1}
-                initial={{ opacity: 0 }}
+                initial={{ opacity: 0, r: 4 }}
                 animate={{ r: [4, 13], opacity: [0.7, 0] }}
                 transition={{ duration: 2.2, repeat: Infinity, delay: delay + 0.9 + i * 0.07, ease: 'easeOut' }}
               />

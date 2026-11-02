@@ -247,7 +247,7 @@ function IncomingSuggestionBanner({ text, onDismiss }) {
 }
 
 /* ─── VideoTile ─────────────────────────────────────────────────────────────── */
-function VideoTile({ stream, name, isPinned, onPin }) {
+function VideoTile({ stream, name, isPinned, onPin, videoOff, audioOff }) {
   const ref = useRef(null);
 
   useEffect(() => {
@@ -256,6 +256,8 @@ function VideoTile({ stream, name, isPinned, onPin }) {
       ref.current.play?.().catch(() => {});
     }
   }, [stream]);
+
+  const showAvatar = !stream || videoOff;
 
   return (
     <div
@@ -269,16 +271,17 @@ function VideoTile({ stream, name, isPinned, onPin }) {
         transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
       }}
     >
-      <video ref={ref} autoPlay playsInline muted={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-      {!stream && (
+      <video ref={ref} autoPlay playsInline muted={false} className="vtile-video" style={{ opacity: videoOff ? 0 : 1 }} />
+      {showAvatar && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, color: 'var(--stage-muted)' }}>
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: 'var(--stage-raised)', border: '1px solid var(--stage-border)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-serif)', fontSize: '1.8rem', color: 'var(--stage-text)' }}>
             {name?.[0]?.toUpperCase() || '?'}
           </div>
-          <span style={{ fontSize: '0.74rem' }}>Connecting…</span>
+          <span style={{ fontSize: '0.74rem' }}>{stream ? 'Camera off' : 'Connecting…'}</span>
         </div>
       )}
-      <div className="stage-chip" style={{ position: 'absolute', bottom: 12, left: 12, pointerEvents: 'none' }}>
+      <div className="stage-chip vtile-name" style={{ position: 'absolute', bottom: 12, left: 12, pointerEvents: 'none' }}>
+        {audioOff && <MicOff size={11} style={{ color: '#FF9A90' }} />}
         {name || 'Partner'}
       </div>
       {isPinned && (
@@ -303,15 +306,15 @@ function VideoGrid({ remotePeers, pinnedPeerId, onPinToggle }) {
     const pinned = remotePeers.get(pinnedPeerId);
     const others = peerList.filter(([id]) => id !== pinnedPeerId);
     return (
-      <div style={{ position: 'absolute', inset: 10, display: 'flex', gap: 10 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <VideoTile stream={pinned.stream} name={pinned.name || 'Partner'} isPinned onPin={() => onPinToggle(null)} />
+      <div className="vgrid-pinned">
+        <div className="vgrid-main">
+          <VideoTile stream={pinned.stream} name={pinned.name || 'Partner'} videoOff={pinned.videoOff} audioOff={pinned.audioOff} isPinned onPin={() => onPinToggle(null)} />
         </div>
         {others.length > 0 && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, width: 200, flexShrink: 0 }}>
+          <div className="vgrid-strip">
             {others.map(([id, peer]) => (
-              <div key={id} style={{ flex: 1, minHeight: 0 }}>
-                <VideoTile stream={peer.stream} name={peer.name || 'Partner'} isPinned={false} onPin={() => onPinToggle(id)} />
+              <div key={id} className="vgrid-strip-item">
+                <VideoTile stream={peer.stream} name={peer.name || 'Partner'} videoOff={peer.videoOff} audioOff={peer.audioOff} isPinned={false} onPin={() => onPinToggle(id)} />
               </div>
             ))}
           </div>
@@ -320,14 +323,13 @@ function VideoGrid({ remotePeers, pinnedPeerId, onPinToggle }) {
     );
   }
 
-  // Column count: 1 → 1 col, 2 → 2 cols, 3-4 → 2 cols, 5 → 3 cols
+  // Column count comes from CSS (data-count) so portrait phones stack tiles vertically
   const count = peerList.length;
-  const cols  = count <= 1 ? 1 : count <= 4 ? 2 : 3;
 
   return (
-    <div style={{ position: 'absolute', inset: count <= 1 ? 0 : 10, display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 10 }}>
+    <div className="vgrid" data-count={Math.min(count, 5)}>
       {peerList.map(([id, peer]) => (
-        <VideoTile key={id} stream={peer.stream} name={peer.name || 'Partner'} isPinned={false} onPin={() => onPinToggle(id)} />
+        <VideoTile key={id} stream={peer.stream} name={peer.name || 'Partner'} videoOff={peer.videoOff} audioOff={peer.audioOff} isPinned={false} onPin={() => onPinToggle(id)} />
       ))}
     </div>
   );
@@ -338,7 +340,7 @@ export default function Translator() {
   const {
     videoRef, canvasRef, isActive, isDetecting, error,
     fps, prediction, backendReady, start, stop, startDetection, stopDetection, getStream,
-    setDetectionFps,
+    setDetectionFps, setTrackEnabled,
   } = useWebcam();
 
   const {
@@ -346,7 +348,7 @@ export default function Translator() {
     remotePeers,
     peerSentence, peerWord, peerSuggestion, peerName, peerChat,
     joinRoom, leaveRoom, sendTranslation, sendSuggestion, sendChatMessage,
-    replaceVideoTrack,
+    replaceVideoTrack, setLocalMedia,
   } = useVideoCall();
 
   const { addToHistory, showToast, getSuggestions } = useApp();
@@ -365,6 +367,10 @@ export default function Translator() {
   const [currentTime, setCurrentTime] = useState('');
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const screenStreamRef = useRef(null);
+  const stageRef        = useRef(null);
+  const panelRef        = useRef(null);
+  // Screen sharing isn't available in mobile browsers — hide the button there
+  const canShareScreen  = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getDisplayMedia;
 
   // Meeting links (/translate?room=CODE) pre-fill the room code in call mode
   useEffect(() => {
@@ -540,23 +546,49 @@ export default function Translator() {
     if (callError) showToast(callError, 'error');
   }, [callError, showToast]);
 
+  // ── Pre-call device preferences (lobby) ─────────────────────────────────────
+  // The lobby shows a live preview; camera / mic toggles here decide how you join.
+  const lobbyVisible   = mode === 'call' && !inRoom;
+  const previewTriedRef = useRef(false);
+  const [joining, setJoining] = useState(false);
+
+  useEffect(() => {
+    if (!lobbyVisible) { previewTriedRef.current = false; return; }
+    if (isVideoOn && !isActive && !previewTriedRef.current) {
+      previewTriedRef.current = true;
+      handleStart({ detect: false, video: true, audio: !isMuted });
+    }
+  }, [lobbyVisible, isVideoOn, isActive, isMuted, handleStart]);
+
   const handleJoinRoom = async () => {
+    if (joining) return;
     const roomId = normalizeRoomCode(roomInput);
     if (!roomId) return showToast('Enter a room code', 'error');
     setRoomInput(roomId);
-    if (!isActive) {
-      const ok = await handleStart({ detect: false });
-      if (!ok) return;
+    setJoining(true);
+    try {
+      if (!isActive) {
+        await handleStart({ detect: false, video: isVideoOn, audio: !isMuted });
+      } else {
+        setTrackEnabled('video', isVideoOn);
+        setTrackEnabled('audio', !isMuted);
+      }
+      // Give a just-started camera a moment to hand over its stream
+      let stream = getStream();
+      for (let i = 0; !stream && i < 10; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        stream = getStream();
+      }
+      if (!stream) showToast('Camera unavailable — joining to watch and chat', 'error');
+      const hasVideo = !!stream?.getVideoTracks().length;
+      const hasAudio = !!stream?.getAudioTracks().length;
+      if (stream && !hasAudio && !isMuted) showToast('No microphone found — joining without audio', 'error');
+      setLocalMedia({ video: isVideoOn && hasVideo, audio: !isMuted && hasAudio });
+      await joinRoom(roomId, stream || null, userName);
+      setInRoom(true);
+    } finally {
+      setJoining(false);
     }
-    // Joining without a stream creates peer connections with no tracks — wait up to 2s for it
-    let stream = getStream();
-    for (let i = 0; !stream && i < 20; i++) {
-      await new Promise(r => setTimeout(r, 100));
-      stream = getStream();
-    }
-    if (!stream) return showToast('Camera not ready — try again', 'error');
-    await joinRoom(roomId, stream, userName);
-    setInRoom(true);
   };
 
   // Show "Your meeting's ready" modal when host is alone waiting for others.
@@ -580,6 +612,11 @@ export default function Translator() {
 
   const handleModeSwitch = (m) => {
     if (m === 'solo' && inRoom) handleLeaveRoom();
+    if (m === 'solo' && !isVideoOn) {
+      // Camera was switched off for the call — solo translation needs it back on
+      setTrackEnabled('video', true);
+      setIsVideoOn(true);
+    }
     if (m === 'call') stopDetection();
     setMode(m); handleReset();
   };
@@ -587,12 +624,38 @@ export default function Translator() {
   // ── Real mic mute: toggle the audio track on the live stream ─────────────────
   const handleMicToggle = useCallback(() => {
     const nextMuted = !isMuted;
-    const stream = getStream();
-    if (stream) {
-      stream.getAudioTracks().forEach(t => { t.enabled = !nextMuted; });
-    }
+    setTrackEnabled('audio', !nextMuted);
+    setLocalMedia({ audio: !nextMuted });
     setIsMuted(nextMuted);
-  }, [getStream, isMuted]);
+  }, [isMuted, setTrackEnabled, setLocalMedia]);
+
+  // ── Camera on/off ────────────────────────────────────────────────────────────
+  // In a call (and in the lobby) the track is only disabled, never stopped: stopping
+  // it would end the track the peers receive, freezing your video for good.
+  const handleVideoToggle = useCallback(() => {
+    const next = !isVideoOn;
+    if (mode === 'call') {
+      const had = setTrackEnabled('video', next);
+      if (!had && next) {
+        if (inRoom) return showToast('No camera available in this call — rejoin to add one', 'error');
+        handleStart({ detect: false, video: true, audio: !isMuted });
+      }
+      if (inRoom) setLocalMedia({ video: next });
+      setIsVideoOn(next);
+      return;
+    }
+    setIsVideoOn(next);
+    next ? handleStart() : handleStop();   // solo: fully release the camera
+  }, [isVideoOn, mode, inRoom, isMuted, setTrackEnabled, setLocalMedia, handleStart, handleStop, showToast]);
+
+  const handlePanelToggle = useCallback(() => {
+    const next = !isSidebarOpen;
+    setIsSidebarOpen(next);
+    // Below 1000px the panel sits under the stage — bring it into view when opened
+    if (next && window.matchMedia('(max-width: 1000px)').matches) {
+      setTimeout(() => panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
+    }
+  }, [isSidebarOpen]);
 
   // ── Real screen share ─────────────────────────────────────────────────────────
   const handleScreenShare = useCallback(async () => {
@@ -730,14 +793,14 @@ export default function Translator() {
               <h2 style={{ fontFamily: 'var(--font-serif)', fontSize: 'clamp(2.2rem, 3.6vw, 3rem)', lineHeight: 1, marginTop: 18, color: 'var(--stage-text)' }}>
                 Sign together,<br /><em style={{ color: '#FF8A4C' }}>see every word.</em>
               </h2>
-              <ul style={{ listStyle: 'none', marginTop: 28, display: 'grid', gap: 12, color: 'var(--stage-muted)', fontSize: '0.86rem' }}>
+              <ul className="tr-lobby-list" style={{ listStyle: 'none', marginTop: 28, display: 'grid', gap: 12, color: 'var(--stage-muted)', fontSize: '0.86rem' }}>
                 {['Up to 6 people per room', 'Live ISL captions shared with everyone', 'Chat and suggestions alongside video'].map(t => (
                   <li key={t} style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
                     <CheckCircle2 size={15} style={{ color: '#FF8A4C', flexShrink: 0 }} /> {t}
                   </li>
                 ))}
               </ul>
-              <div style={{ position: 'absolute', right: -10, bottom: -30, opacity: 0.9 }}>
+              <div className="tr-lobby-hand" style={{ position: 'absolute', right: -10, bottom: -30, opacity: 0.9 }}>
                 <HandLandmarks size={180} color="#F3EFE8" accent="#FF8A4C" />
               </div>
             </div>
@@ -749,9 +812,41 @@ export default function Translator() {
                   Share the same code with the people you’re calling.
                 </p>
               </div>
+
+              {/* Pre-call preview + device toggles */}
+              <div className="tr-preview">
+                <video ref={attachLocalVideo} autoPlay playsInline muted className="tr-preview-video" style={{ opacity: isVideoOn && isActive ? 1 : 0 }} />
+                {!(isVideoOn && isActive) && (
+                  <div className="tr-preview-off">
+                    {isVideoOn ? <Loader2 size={20} className="spin" /> : <VideoOff size={22} />}
+                    <span>{isVideoOn ? (error || 'Starting camera…') : 'Camera is off'}</span>
+                  </div>
+                )}
+                <div className="tr-preview-ctrls">
+                  <button
+                    type="button" className="tr-pre-btn" data-off={!isVideoOn} aria-pressed={isVideoOn}
+                    onClick={handleVideoToggle}
+                    aria-label={isVideoOn ? 'Turn camera off before joining' : 'Turn camera on before joining'}
+                    title={isVideoOn ? 'Camera on' : 'Camera off'}
+                  >
+                    {isVideoOn ? <Video size={18} /> : <VideoOff size={18} />}
+                  </button>
+                  <button
+                    type="button" className="tr-pre-btn" data-off={isMuted} aria-pressed={!isMuted}
+                    onClick={handleMicToggle}
+                    aria-label={isMuted ? 'Turn microphone on before joining' : 'Turn microphone off before joining'}
+                    title={isMuted ? 'Mic off' : 'Mic on'}
+                  >
+                    {isMuted ? <MicOff size={18} /> : <Mic size={18} />}
+                  </button>
+                </div>
+              </div>
+              <p className="tr-pre-status">
+                Join with camera <b data-off={!isVideoOn}>{isVideoOn ? 'on' : 'off'}</b> and mic <b data-off={isMuted}>{isMuted ? 'off' : 'on'}</b>
+              </p>
               <label style={{ display: 'grid', gap: 8 }}>
                 <span className="section-label" style={{ margin: 0 }}>Your name</span>
-                <input className="input-field" style={{ height: 46 }} value={userName} onChange={e => setUserName(e.target.value)} placeholder="How others will see you" />
+                <input className="input-field" style={{ height: 46 }} value={userName} onChange={e => setUserName(e.target.value)} placeholder="How others will see you" autoComplete="nickname" enterKeyHint="next" maxLength={40} />
               </label>
               <label style={{ display: 'grid', gap: 8 }}>
                 <span style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -759,6 +854,7 @@ export default function Translator() {
                   <button
                     type="button"
                     onClick={() => setRoomInput(normalizeRoomCode(Math.random().toString(36).slice(2, 8)))}
+                    className="tr-newcode"
                     style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: 'none', border: 0, color: 'var(--accent)', fontSize: '0.76rem', fontWeight: 500, cursor: 'pointer' }}
                   >
                     <Shuffle size={12} /> New code
@@ -771,14 +867,15 @@ export default function Translator() {
                   onKeyDown={e => e.key === 'Enter' && handleJoinRoom()}
                   placeholder="ABCD1234"
                   maxLength={8}
+                  autoCapitalize="characters" autoComplete="off" autoCorrect="off" spellCheck={false} enterKeyHint="go"
                   style={{ height: 56, fontSize: '1.3rem', letterSpacing: '0.32em', textAlign: 'center', textTransform: 'uppercase' }}
                 />
               </label>
-              <button onClick={handleJoinRoom} className="btn-primary btn-lg" style={{ width: '100%' }}>
-                <Phone size={16} /> Join call
+              <button onClick={handleJoinRoom} disabled={joining} className="btn-primary btn-lg" style={{ width: '100%' }}>
+                {joining ? <Loader2 size={16} className="spin" /> : <Phone size={16} />} {joining ? 'Joining…' : 'Join call'}
               </button>
               <p style={{ fontSize: '0.74rem', color: 'var(--text-faint)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Lock size={11} /> Your camera turns on when you join.
+                <Lock size={11} /> You can switch your camera and mic on or off any time during the call.
               </p>
             </div>
           </motion.div>
@@ -788,7 +885,7 @@ export default function Translator() {
         <div className="tr-body">
 
           {/* STAGE */}
-          <div className={`stage tr-stage ${!inCall ? 'viewfinder' : ''}`}>
+          <div ref={stageRef} className={`stage tr-stage ${!inCall ? 'viewfinder' : ''}`} data-call={inCall}>
 
             {inCall ? (
               remotePeers.size > 0 ? (
@@ -852,7 +949,7 @@ export default function Translator() {
             <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '50%', background: 'linear-gradient(to top, rgba(11,10,9,0.92) 0%, rgba(11,10,9,0.45) 45%, transparent 100%)', pointerEvents: 'none', zIndex: 5 }} />
 
             {/* Top-left chips */}
-            <div style={{ position: 'absolute', top: 16, left: inCall ? 16 : 52, display: 'flex', gap: 8, zIndex: 12, flexWrap: 'wrap' }}>
+            <div className="tr-chips" data-call={inCall}>
               {inCall && remotePeers.size > 0 && (
                 <span className="stage-chip">
                   <span style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 11 }}>
@@ -879,11 +976,16 @@ export default function Translator() {
             {/* Local PiP */}
             {inCall && (
               <motion.div
-                drag dragConstraints={{ left: -800, right: 0, top: 0, bottom: 400 }} dragMomentum={false}
+                drag dragConstraints={stageRef} dragElastic={0.08} dragMomentum={false}
                 whileDrag={{ scale: 1.03 }}
-                style={{ position: 'absolute', top: 16, right: 16, width: 168, aspectRatio: '3/4', background: '#161513', borderRadius: 16, overflow: 'hidden', border: '1px solid rgba(243,239,232,0.22)', boxShadow: '0 16px 40px -8px rgba(0,0,0,0.7)', cursor: 'grab', zIndex: 20 }}
+                className="tr-pip"
               >
-                <video ref={attachLocalVideo} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', pointerEvents: 'none' }} />
+                <video ref={attachLocalVideo} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)', pointerEvents: 'none', opacity: isVideoOn ? 1 : 0 }} />
+                {!isVideoOn && (
+                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--stage-muted)', pointerEvents: 'none' }}>
+                    <VideoOff size={20} />
+                  </div>
+                )}
                 <div style={{ position: 'absolute', bottom: 8, left: 8, right: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between', pointerEvents: 'none' }}>
                   <span className="stage-chip" style={{ height: 24, fontSize: '0.66rem', padding: '0 8px' }}>{userName || 'You'}</span>
                   {isMuted && <span style={{ width: 24, height: 24, borderRadius: '50%', background: 'rgba(255,122,110,0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><MicOff size={11} color="#fff" /></span>}
@@ -922,7 +1024,7 @@ export default function Translator() {
                   {suggestions.length > 0 && (
                     <div className="no-scrollbar" style={{ display: 'flex', gap: 6, marginTop: 14, overflowX: 'auto' }}>
                       {suggestions.map((s, k) => (
-                        <button key={k} onClick={() => applySuggestion(s)} className="stage-chip" style={{ cursor: 'pointer', flexShrink: 0 }}>
+                        <button key={k} onClick={() => applySuggestion(s)} className="stage-chip tr-sugg-chip" style={{ cursor: 'pointer', flexShrink: 0 }}>
                           <Lightbulb size={11} style={{ color: '#F2C14E' }} /> {s}
                         </button>
                       ))}
@@ -933,38 +1035,39 @@ export default function Translator() {
             </AnimatePresence>
 
             {/* Dock */}
-            <div className="dock" style={{ position: 'absolute', bottom: 18, left: '50%', transform: 'translateX(-50%)', zIndex: 30 }}>
+            <div className="dock tr-dock">
               {inCall && (
                 <>
                   <CtrlBtn state={isMuted ? 'danger' : undefined} title={isMuted ? 'Unmute mic' : 'Mute mic'} onClick={handleMicToggle}>
                     {isMuted ? <MicOff size={18} /> : <Mic size={18} />}
                   </CtrlBtn>
-                  <CtrlBtn state={isScreenSharing ? 'on' : undefined} title={isScreenSharing ? 'Stop sharing' : 'Share screen'} onClick={handleScreenShare}>
-                    {isScreenSharing ? <MonitorOff size={18} /> : <Monitor size={18} />}
-                  </CtrlBtn>
+                  {canShareScreen && (
+                    <CtrlBtn state={isScreenSharing ? 'on' : undefined} title={isScreenSharing ? 'Stop sharing' : 'Share screen'} onClick={handleScreenShare} className="dock-share">
+                      {isScreenSharing ? <MonitorOff size={18} /> : <Monitor size={18} />}
+                    </CtrlBtn>
+                  )}
                   {inRoom && (
-                    <CtrlBtn title="Share meeting link" onClick={() => setShowMeetingModal(true)}>
+                    <CtrlBtn title="Share meeting link" onClick={() => setShowMeetingModal(true)} className="dock-invite">
                       <Link2 size={18} />
                     </CtrlBtn>
                   )}
-                  <span style={{ width: 1, height: 26, background: 'var(--stage-border)', margin: '0 4px' }} />
+                  <span className="dock-sep" />
                 </>
               )}
-              <CtrlBtn state={!isVideoOn ? 'danger' : undefined} title="Toggle camera" onClick={() => { setIsVideoOn(!isVideoOn); isVideoOn ? handleStop() : handleStart(); }}>
+              <CtrlBtn state={!isVideoOn ? 'danger' : undefined} title={isVideoOn ? 'Turn camera off' : 'Turn camera on'} onClick={handleVideoToggle}>
                 {isVideoOn ? <Video size={18} /> : <VideoOff size={18} />}
               </CtrlBtn>
               <CtrlBtn state={isAslActive ? 'accent' : undefined} title={isAslActive ? 'Hide ISL captions' : 'Show ISL captions'} onClick={() => setIsAslActive(!isAslActive)}>
                 <Sparkles size={18} />
               </CtrlBtn>
-              <CtrlBtn state={isSidebarOpen ? 'on' : undefined} title="Transcript panel" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
+              <CtrlBtn state={isSidebarOpen ? 'on' : undefined} title="Transcript panel" onClick={handlePanelToggle}>
                 <PanelRight size={18} />
               </CtrlBtn>
               {inCall && (
                 <>
-                  <span style={{ width: 1, height: 26, background: 'var(--stage-border)', margin: '0 4px' }} />
-                  <motion.button onClick={handleLeaveRoom} whileTap={{ scale: 0.96 }}
-                    style={{ display: 'flex', alignItems: 'center', gap: 8, height: 44, padding: '0 16px', borderRadius: 14, background: '#E5483B', color: '#fff', border: 'none', cursor: 'pointer', fontWeight: 500, fontSize: '0.84rem' }}>
-                    <PhoneOff size={16} /> Leave
+                  <span className="dock-sep" />
+                  <motion.button onClick={handleLeaveRoom} whileTap={{ scale: 0.96 }} className="dock-leave" aria-label="Leave call">
+                    <PhoneOff size={16} /> <span className="dock-leave-label">Leave</span>
                   </motion.button>
                 </>
               )}
@@ -978,6 +1081,7 @@ export default function Translator() {
                 initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 24 }}
                 transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
                 className="tr-panel"
+                ref={panelRef}
               >
                 {inCall && (
                   <div style={{ padding: '12px 12px 0' }}>
@@ -1119,9 +1223,10 @@ export default function Translator() {
                         onChange={e => setChatInput(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && handleSendChat()}
                         placeholder="Message everyone…"
-                        style={{ height: 44, paddingRight: 48 }}
+                        enterKeyHint="send"
+                        style={{ height: 46, paddingRight: 54 }}
                       />
-                      <button onClick={handleSendChat} aria-label="Send" className="btn-primary" style={{ position: 'absolute', right: 5, top: 5, width: 34, height: 34, padding: 0, borderRadius: 9 }}>
+                      <button onClick={handleSendChat} aria-label="Send" className="btn-primary" style={{ position: 'absolute', right: 4, top: 4, width: 38, height: 38, padding: 0, borderRadius: 10 }}>
                         <Send size={14} />
                       </button>
                     </div>
@@ -1180,29 +1285,132 @@ export default function Translator() {
         }
         .tr-lobby-art { position: relative; overflow: hidden; padding: 40px; background: var(--stage); min-height: 420px; }
         .tr-lobby-form { padding: 40px; display: flex; flex-direction: column; gap: 20px; justify-content: center; }
+        /* ── Stage furniture ─────────────────────────────────────────────── */
+        .tr-dock { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 30; max-width: calc(100% - 16px); }
+        .dock-sep { width: 1px; height: 26px; background: var(--stage-border); margin: 0 4px; flex-shrink: 0; }
+        .dock-btn { flex-shrink: 0; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+        .dock-leave {
+          display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 16px; border-radius: 14px; flex-shrink: 0;
+          background: #E5483B; color: #fff; border: none; cursor: pointer; font-weight: 500; font-size: 0.84rem;
+          touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+        }
+        .tr-chips { position: absolute; top: 16px; left: 52px; right: 16px; display: flex; gap: 8px; z-index: 12; flex-wrap: wrap; pointer-events: none; }
+        .tr-chips > * { pointer-events: auto; }
+        .tr-chips[data-call="true"] { left: 16px; right: 200px; }
+        .tr-pip {
+          position: absolute; top: 16px; right: 16px; width: 168px; aspect-ratio: 3 / 4; z-index: 20;
+          background: #161513; border-radius: 16px; overflow: hidden; border: 1px solid rgba(243,239,232,0.22);
+          box-shadow: 0 16px 40px -8px rgba(0,0,0,0.7); cursor: grab; touch-action: none;
+        }
+        .vgrid { position: absolute; inset: 10px; display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); }
+        .vgrid[data-count="1"] { inset: 0; grid-template-columns: 1fr; }
+        .vgrid[data-count="5"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .vgrid-pinned { position: absolute; inset: 10px; display: flex; gap: 10px; }
+        .vgrid-main { flex: 1; min-width: 0; min-height: 0; }
+        .vgrid-strip { display: flex; flex-direction: column; gap: 10px; width: 200px; flex-shrink: 0; }
+        .vgrid-strip-item { flex: 1; min-height: 0; }
+        .vtile-video { width: 100%; height: 100%; object-fit: cover; transition: opacity .2s ease; }
+        .tr-sugg-chip { min-height: 30px; }
+
+        /* ── Lobby preview + pre-call toggles ────────────────────────────── */
+        .tr-preview { position: relative; aspect-ratio: 16 / 10; border-radius: 16px; overflow: hidden; background: var(--stage); border: 1px solid var(--border-hover); }
+        .tr-preview-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); transition: opacity .2s ease; }
+        .tr-preview-off { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; color: var(--stage-muted); font-size: 0.8rem; text-align: center; padding: 0 16px 48px; }
+        .tr-preview-ctrls { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); display: flex; gap: 10px; }
+        .tr-pre-btn {
+          width: 46px; height: 46px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+          border: 1px solid rgba(243,239,232,0.25); background: rgba(20,19,17,0.72); color: #F3EFE8; cursor: pointer;
+          backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+          transition: background .2s ease, color .2s ease, transform .15s ease;
+        }
+        .tr-pre-btn:hover { background: rgba(255,255,255,0.16); }
+        .tr-pre-btn:active { transform: scale(0.94); }
+        .tr-pre-btn[data-off="true"] { background: #E5483B; border-color: #E5483B; color: #fff; }
+        .tr-pre-status { margin-top: -10px; font-size: 0.76rem; color: var(--text-faint); text-align: center; }
+        .tr-pre-status b { font-weight: 600; color: var(--green); }
+        .tr-pre-status b[data-off="true"] { color: var(--red); }
+        .tr-newcode { padding: 6px 2px; margin: -6px 0; min-height: 32px; }
+        .spin { animation: spin 0.9s linear infinite; }
+        .btn-primary:disabled { opacity: 0.7; cursor: progress; }
+
         @media (max-width: 1000px) {
           .tr-root { overflow-y: auto; height: auto; }
           .tr-body { flex-direction: column; }
-          .tr-stage { min-height: 62vh; }
-          .tr-panel { width: 100%; max-height: none; }
+          .tr-stage { min-height: min(68vh, 680px); min-height: min(68dvh, 680px); }
+          .tr-panel { width: 100%; max-height: none; scroll-margin-top: 64px; }
           .tr-lobby { grid-template-columns: 1fr; }
-          .tr-lobby-art { min-height: 260px; }
+          .tr-lobby-art { min-height: 220px; }
         }
         @media (max-width: 640px) {
           .tr-hide-sm { display: none !important; }
-          .tr-caption { bottom: 84px; padding: 14px 16px; }
-          .tr-lobby-art, .tr-lobby-form { padding: 26px; }
-          .dock { gap: 4px !important; }
+          .tr-toolbar h1 { font-size: 1.6rem !important; }
+          .tr-body { padding: 10px 10px 14px; gap: 10px; }
+          .tr-stage { min-height: calc(100dvh - 190px); border-radius: 20px; }
+          .tr-caption { bottom: 76px; padding: 12px 14px; width: calc(100% - 20px); }
+          .tr-lobby-wrap { padding: 12px 10px 24px; align-items: flex-start; }
+          .tr-lobby-art { min-height: 0; padding: 22px 22px 20px; }
+          .tr-lobby-art h2 { font-size: 1.9rem !important; margin-top: 10px !important; }
+          .tr-lobby-list, .tr-lobby-hand { display: none !important; }
+          .tr-lobby-form { padding: 20px; gap: 16px; }
+          .tr-dock { bottom: 10px; }
+          .dock { gap: 4px !important; padding: 5px !important; border-radius: 18px !important; }
+          .dock-btn { width: 42px !important; height: 42px !important; border-radius: 12px !important; }
+          .dock-sep { margin: 0 1px; }
+          .dock-leave { width: 42px; height: 42px; padding: 0; justify-content: center; border-radius: 12px; }
+          .dock-leave-label { display: none; }
+          .tr-chips { top: 10px; left: 12px; right: 12px; gap: 6px; }
+          .tr-chips[data-call="true"] { right: 112px; }
+          .tr-chips .stage-chip { height: 28px; font-size: 0.68rem; padding: 0 0.6rem; }
+          .tr-pip { width: 92px; top: 10px; right: 10px; border-radius: 12px; }
+          .vgrid, .vgrid-pinned { inset: 6px; gap: 6px; }
+          .vgrid[data-count="1"] { inset: 0; }
+          .vtile-video { object-fit: contain; background: #0B0A09; }
+          .vtile-name { bottom: 8px !important; left: 8px !important; }
+          .vgrid-pinned { flex-direction: column; }
+          .vgrid-strip { flex-direction: row; width: auto; height: 96px; }
+        }
+        /* Very small phones (≈320–360px): keep every control on screen at ≥40px */
+        @media (max-width: 360px) {
+          .dock { gap: 3px !important; padding: 4px !important; }
+          .dock-sep { display: none; }
+          .dock-invite { display: none !important; } /* invite link stays on the waiting screen + modal */
+          .dock-btn, .dock-leave { width: 40px !important; height: 40px !important; }
+          .tr-pip { width: 78px; }
+          .tr-chips[data-call="true"] { right: 96px; }
+        }
+        /* Portrait phones: stack two people vertically instead of two thin columns */
+        @media (max-width: 640px) and (orientation: portrait) {
+          .vgrid[data-count="2"] { grid-template-columns: 1fr; }
+          .vgrid[data-count="5"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        /* Landscape phones: give the video the full height */
+        @media (max-height: 520px) and (orientation: landscape) {
+          .tr-toolbar { padding-top: 8px; }
+          .tr-toolbar h1 { font-size: 1.4rem !important; }
+          .tr-body { padding: 8px 10px 10px; }
+          .tr-stage { min-height: calc(100dvh - 72px); }
+          .tr-caption { bottom: 70px; max-width: 70%; padding: 10px 14px; }
+          .tr-caption p { font-size: 1.25rem !important; }
+          .tr-pip { width: 86px; aspect-ratio: 4 / 3; top: 10px; right: 10px; }
+          .tr-chips[data-call="true"] { right: 110px; }
+          .tr-dock { bottom: 8px; }
           .dock-btn { width: 40px !important; height: 40px !important; }
+          .dock-leave { height: 40px; }
+          .vtile-video { object-fit: contain; background: #0B0A09; }
+        }
+        @media (pointer: coarse) {
+          .tr-sugg-chip { min-height: 36px; }
+          .tr-action { min-height: 56px; }
+          .tr-suggestion { min-height: 44px; }
         }
       `}</style>
     </div>
   );
 }
 
-function CtrlBtn({ children, onClick, title, state }) {
+function CtrlBtn({ children, onClick, title, state, className = '' }) {
   return (
-    <button onClick={onClick} data-tip={title} aria-label={title} className="dock-btn" data-state={state}>
+    <button onClick={onClick} data-tip={title} aria-label={title} aria-pressed={state === 'on' || state === 'accent' ? true : undefined} className={`dock-btn ${className}`} data-state={state}>
       {children}
     </button>
   );

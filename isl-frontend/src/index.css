@@ -711,3 +711,12 @@ input, select, textarea { font-family: inherit; }
   .topbar-crumb { display: flex; }
   .mobile-only, .mobile-sheet { display: none; }
 }
+
+/* ── Touch devices ────────────────────────────────────────────────────────── */
+/* No 300 ms double-tap delay / grey flash on buttons and links */
+button, a, [role="button"], [role="tab"], label { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+@media (pointer: coarse) {
+  /* iOS zooms the whole page when focusing an input smaller than 16px */
+  .input-field, input, textarea, select { font-size: 16px; }
+  .icon-btn { min-width: 40px; min-height: 40px; }
+}

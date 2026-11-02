@@ -29,6 +29,7 @@
  *   sendSuggestion(text)
  *   sendChatMessage(text)  → boolean (false if the chat socket is not open)
  *   replaceVideoTrack(newTrack)
+ *   setLocalMedia({ video, audio }) — tell peers our camera/mic are on/off
  */
 
 import { useRef, useState, useCallback, useEffect } from "react";
@@ -165,6 +166,8 @@ export function useVideoCall() {
   const peersRef             = useRef(new Map());
   const pendingCandidatesRef = useRef(new Map());  // Map<peerId, RTCIceCandidateInit[]>
   const namesRef             = useRef(new Map());  // Map<peerId, displayName>
+  const mediaRef             = useRef(new Map());  // Map<peerId, { video, audio }>
+  const localMediaRef        = useRef({ video: true, audio: true });
 
   const [status,         setStatus]         = useState("idle");
   const [error,          setError]          = useState(null);
@@ -181,7 +184,10 @@ export function useVideoCall() {
   const syncPeers = useCallback(() => {
     const peers = peersRef.current;
     setRemotePeers(new Map(
-      [...peers.entries()].map(([id, p]) => [id, { stream: p.stream, name: p.name, state: p.pc.connectionState }])
+      [...peers.entries()].map(([id, p]) => {
+        const media = mediaRef.current.get(id) || { video: true, audio: true };
+        return [id, { stream: p.stream, name: p.name, state: p.pc.connectionState, videoOff: media.video === false, audioOff: media.audio === false }];
+      })
     ));
     const first = peers.values().next().value;
     setPeerName(first?.name || "");
@@ -213,7 +219,7 @@ export function useVideoCall() {
 
   const announceName = useCallback((isReply = false) => {
     if (!myIdRef.current) return;
-    sendChatRaw({ type: "name", name: myNameRef.current, peer_id: myIdRef.current, isReply });
+    sendChatRaw({ type: "name", name: myNameRef.current, peer_id: myIdRef.current, isReply, media: localMediaRef.current });
   }, [sendChatRaw]);
 
   // ── Peer lifecycle ──────────────────────────────────────────────────────────
@@ -257,6 +263,7 @@ export function useVideoCall() {
     rejoinAttemptsRef.current = 0;
     teardownConnections();
     namesRef.current.clear();
+    mediaRef.current.clear();
     setMyId(null);
     setRemotePeers(new Map());
     setStatus("idle");
@@ -481,12 +488,18 @@ export function useVideoCall() {
       case "name": {
         if (!msg.peer_id) break;
         namesRef.current.set(msg.peer_id, msg.name || "Partner");
+        if (msg.media) mediaRef.current.set(msg.peer_id, { video: msg.media.video !== false, audio: msg.media.audio !== false });
         const entry = peersRef.current.get(msg.peer_id);
         if (entry) entry.name = msg.name || "Partner";
         syncPeers();
         if (!msg.isReply) announceName(true);
         break;
       }
+      case "media":
+        if (!msg.peer_id) break;
+        mediaRef.current.set(msg.peer_id, { video: msg.video !== false, audio: msg.audio !== false });
+        syncPeers();
+        break;
       case "translation":
         if (msg.sentence !== undefined) setPeerSentence(msg.sentence);
         if (msg.word !== undefined) setPeerWord(msg.word);
@@ -657,6 +670,14 @@ export function useVideoCall() {
   const sendSuggestion = useCallback((text) =>
     sendChatRaw({ type: "suggestion", peer_id: myIdRef.current, text }), [sendChatRaw]);
 
+  const setLocalMedia = useCallback(({ video, audio }) => {
+    localMediaRef.current = {
+      video: video ?? localMediaRef.current.video,
+      audio: audio ?? localMediaRef.current.audio,
+    };
+    if (myIdRef.current) sendChatRaw({ type: "media", peer_id: myIdRef.current, ...localMediaRef.current });
+  }, [sendChatRaw]);
+
   const sendChatMessage = useCallback((text) =>
     sendChatRaw({ type: "chat", peer_id: myIdRef.current, name: myNameRef.current, text }), [sendChatRaw]);
 
@@ -683,6 +704,7 @@ export function useVideoCall() {
     joinRoom,
     leaveRoom,
     replaceVideoTrack,
+    setLocalMedia,
     sendTranslation,
     sendSuggestion,
     sendChatMessage,
