@@ -35,11 +35,11 @@ const LANG_CONFIG = {
 
 // ── Translation — Google Translate (primary) + MyMemory (fallback) ───────────
 // Google Translate unofficial endpoint always returns the target script (Devanagari)
-async function translateViaGoogle(text, targetLang) {
+async function translateViaGoogle(text, targetLang, source = 'en') {
   const tl = LANG_CONFIG[targetLang]?.mmLang || targetLang; // 'hi', 'mr', etc.
   // Use the unofficial single-text endpoint (no API key needed)
   const url =
-    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${tl}` +
+    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source}&tl=${tl}` +
     `&dt=t&q=${encodeURIComponent(text)}`;
   const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`Google HTTP ${res.status}`);
@@ -69,13 +69,14 @@ async function translateViaMyMemory(text, targetLang) {
   throw new Error('No translation');
 }
 
-async function translateText(text, targetLang) {
-  if (!text || targetLang === 'en') return text;
+async function translateText(text, targetLang, source = 'en') {
+  if (!text || (targetLang === 'en' && source === 'en')) return text;
   try {
     // Primary: Google Translate (always gives Devanagari for hi/mr)
-    return await translateViaGoogle(text, targetLang);
+    return await translateViaGoogle(text, targetLang, source);
   } catch (err) {
     console.warn('[translateText] Google failed, trying MyMemory:', err.message);
+    if (source !== 'en') return text; // MyMemory needs an explicit source language
     try {
       return await translateViaMyMemory(text, targetLang);
     } catch (err2) {
@@ -83,6 +84,52 @@ async function translateText(text, targetLang) {
       return text; // graceful fallback
     }
   }
+}
+
+// ── Cached translation: every visible string (suggestions, chat, partner captions)
+// follows the selected output language. Results are cached per language, so
+// switching back and forth is instant and each phrase is fetched only once.
+const tCache   = new Map();
+const tPending = new Map();
+const needsTranslation = (text, lang, source) =>
+  !!text && !(lang === 'en' && (source === 'en' || /^[\x00-\x7F]*$/.test(text)));
+
+function translateCached(text, lang, source = 'en') {
+  if (!needsTranslation(text, lang, source)) return Promise.resolve(text);
+  const key = `${source}|${lang}|${text}`;
+  if (tCache.has(key)) return Promise.resolve(tCache.get(key));
+  if (!tPending.has(key)) {
+    tPending.set(key, translateText(text, lang, source)
+      .then(r => { const out = r || text; tCache.set(key, out); return out; })
+      .finally(() => tPending.delete(key)));
+  }
+  return tPending.get(key);
+}
+
+function useTranslated(text, lang, source = 'en') {
+  const key = `${source}|${lang}|${text}`;
+  const [state, setState] = useState(() => ({ key, value: needsTranslation(text, lang, source) ? tCache.get(key) : text }));
+  useEffect(() => {
+    if (!needsTranslation(text, lang, source)) { setState({ key, value: text }); return; }
+    if (tCache.has(key)) { setState({ key, value: tCache.get(key) }); return; }
+    let alive = true;
+    setState({ key, value: undefined });
+    translateCached(text, lang, source).then(v => { if (alive) setState({ key, value: v }); });
+    return () => { alive = false; };
+  }, [key, text, lang, source]);
+  const ready = state.key === key && state.value !== undefined;
+  return { value: ready ? state.value : text, pending: !ready };
+}
+
+/** Renders `text` in the selected output language (original shown faintly while loading). */
+function TText({ text, lang, source = 'en', className = '', style, as: Tag = 'span' }) {
+  const { value, pending } = useTranslated(text, lang, source);
+  const deva = lang === 'hi' || lang === 'mr';
+  return (
+    <Tag className={`${deva && !pending ? 'deva' : ''} ${className}`.trim()} style={{ opacity: pending ? 0.55 : 1, transition: 'opacity .2s ease', ...style }} lang={pending ? undefined : LANG_CONFIG[lang]?.bcp47}>
+      {value}
+    </Tag>
+  );
 }
 
 // ── Extract Devanagari from mixed MyMemory responses ─────────────────────────
@@ -133,7 +180,12 @@ function pickVoice(bcp47, hints) {
   v = voices.find(v => v.lang.startsWith(prefix));
   return v || null;
 }
-const HOLD_FRAMES    = 8;
+// A sign is committed after it has been held steadily for HOLD_MS (≈1.5 s) —
+// time-based, so it no longer depends on how many frames the network delivers.
+const HOLD_MS          = 1500;
+const MIN_HOLD_FRAMES  = 3;     // …and seen in at least this many predictions
+const GRACE_FRAMES     = 1;     // one stray / no-hand frame doesn't restart the hold
+const REPEAT_RESET_MS  = 1200;  // hand away this long → the same sign can be committed again
 
 const STATUS_META = {
   idle:       { label: 'Not in call',        color: 'var(--text-faint)', dot: 'var(--text-faint)', glow: 'transparent' },
@@ -437,8 +489,10 @@ export default function Translator() {
   const [isTranslating, setIsTranslating]   = useState(false);
   const [isSpeaking, setIsSpeaking]         = useState(false);
   const [speechRate, setSpeechRate]         = useState(1.25);  // Web Speech API: 0.1–10, 1=normal
-  const [lastWord, setLastWord]             = useState('');
-  const [holdCount, setHoldCount]           = useState(0);
+  const lastWordRef   = useRef('');
+  const holdRef       = useRef({ sign: null, since: 0, frames: 0, misses: 0, conf: 0 });
+  const lastHandAtRef = useRef(0);
+  const [holdPct, setHoldPct]               = useState(0);
   const [suggestions, setSuggestions]       = useState([]);
   const [selectedSuggestion, setSelectedSuggestion] = useState(null);
   
@@ -458,7 +512,7 @@ export default function Translator() {
     // Debounce: cancel previous in-flight translation
     const timer = setTimeout(async () => {
       setIsTranslating(true);
-      const result = await translateText(english, language);
+      const result = await translateCached(english, language);
       setTranslatedText(result);
       setIsTranslating(false);
     }, 400); // wait 400ms after last word added
@@ -466,43 +520,63 @@ export default function Translator() {
   }, [sentence, language]);
 
   // ── Sign detection ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!prediction?.hand_detected) { setHoldCount(0); return; }
-    const { sign, confidence } = prediction;
-    if (confidence < MIN_CONFIDENCE || sign === lastWord) { setHoldCount(0); return; }
+  const resetHold = useCallback(() => {
+    holdRef.current = { sign: null, since: 0, frames: 0, misses: 0, conf: 0 };
+    setHoldPct(0);
+  }, []);
 
-    setHoldCount(prev => {
-      const next = prev + 1;
-      if (next >= HOLD_FRAMES) {
-        setSentence(s => {
-          const updated = [...s, { word: sign, confidence }];
-          setSuggestions(getSuggestions(updated.map(x => x.word)));
-          // Relayed over the chat WebSocket — no need to wait for the WebRTC media path
-          if (mode === 'call' && inRoom) {
-            sendTranslation(sign, updated.map(x => x.word).join(' '));
-          }
-          return updated;
-        });
-        setLastWord(sign);
-        return 0;
-      }
-      return next;
-    });
-  }, [prediction, lastWord, getSuggestions, mode, inRoom, sendTranslation]);
+  const commitWord = useCallback((sign, confidence) => {
+    const updated = [...sentenceRef.current, { word: sign, confidence }];
+    sentenceRef.current = updated;
+    setSentence(updated);
+    setSuggestions(getSuggestions(updated.map(x => x.word)));
+    // Relayed over the chat WebSocket — no need to wait for the WebRTC media path
+    if (mode === 'call' && inRoom) sendTranslation(sign, updated.map(x => x.word).join(' '));
+    lastWordRef.current = sign;
+  }, [getSuggestions, mode, inRoom, sendTranslation]);
+
+  useEffect(() => {
+    if (!prediction) return;
+    const now = performance.now();
+    const h = holdRef.current;
+    const { sign, confidence, hand_detected } = prediction;
+
+    if (hand_detected) lastHandAtRef.current = now;
+    else if (lastWordRef.current && now - lastHandAtRef.current > REPEAT_RESET_MS) lastWordRef.current = '';
+
+    const usable = hand_detected && confidence >= MIN_CONFIDENCE && sign !== lastWordRef.current;
+    if (!usable || (h.sign && sign !== h.sign)) {
+      // Tolerate a single stray frame (motion blur, a flicker to another class)
+      if (h.sign && h.misses < GRACE_FRAMES) { h.misses += 1; return; }
+      if (!usable) { resetHold(); return; }
+    }
+    if (h.sign !== sign) {
+      holdRef.current = { sign, since: now, frames: 1, misses: 0, conf: confidence };
+      setHoldPct(0);
+      return;
+    }
+    h.frames += 1; h.misses = 0; h.conf = Math.max(h.conf, confidence);
+    const progress = Math.min(1, (now - h.since) / HOLD_MS);
+    setHoldPct(progress * 100);
+    if (progress >= 1 && h.frames >= MIN_HOLD_FRAMES) {
+      commitWord(sign, h.conf);
+      resetHold();
+    }
+  }, [prediction, commitWord, resetHold]);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   const getText = () => sentence.map(s => s.word).join(' ');
   const getDisplayText = () => translatedText || getText();
 
   const handleStart = useCallback(async (opts) => {
-    setLastWord(''); setHoldCount(0);
+    lastWordRef.current = ''; resetHold();
     return await start(opts);
   }, [start]);
 
   const handleStop  = useCallback(() => stop(), [stop]);
 
   const handleReset = useCallback(() => {
-    setSentence([]); setLastWord(''); setHoldCount(0); setSuggestions([]); setSelectedSuggestion(null);
+    setSentence([]); sentenceRef.current = []; lastWordRef.current = ''; resetHold(); setSuggestions([]); setSelectedSuggestion(null);
     setTranslatedText(''); setIsTranslating(false);
   }, []);
 
@@ -875,7 +949,6 @@ export default function Translator() {
   // ═══════════════════════════════════════════════════════════════════════════
 
   const hasHand     = !!prediction?.hand_detected;
-  const holdPct     = Math.min(100, (holdCount / HOLD_FRAMES) * 100);
   const displayText = getDisplayText() || getText();
   const inCall      = mode === 'call';
 
@@ -1151,14 +1224,14 @@ export default function Translator() {
                   {peerSentence && isAslActive && (
                     <motion.div key="peer-caption" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="tr-fs-bubble">
                       <span className="tr-fs-who">{peerName || 'Partner'} is signing</span>
-                      <span className="tr-fs-text">{peerSentence}</span>
+                      <TText className="tr-fs-text" text={peerSentence} lang={language} />
                     </motion.div>
                   )}
                   {fsChat && (
                     <motion.div key={fsChat.id} initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="tr-fs-bubble tr-fs-chat">
                       <MessageSquare size={13} />
                       <span className="tr-fs-who">{fsChat.sender || peerName || 'Partner'}</span>
-                      <span className="tr-fs-text">{fsChat.text}</span>
+                      <TText className="tr-fs-text" text={fsChat.text} lang={language} source="auto" />
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -1197,7 +1270,7 @@ export default function Translator() {
                     <div className="no-scrollbar" style={{ display: 'flex', gap: 6, marginTop: 14, overflowX: 'auto' }}>
                       {suggestions.map((s, k) => (
                         <button key={k} onClick={() => applySuggestion(s)} className="stage-chip tr-sugg-chip" style={{ cursor: 'pointer', flexShrink: 0 }}>
-                          <Lightbulb size={11} style={{ color: '#F2C14E' }} /> {s}
+                          <Lightbulb size={11} style={{ color: '#F2C14E' }} /> <TText text={s} lang={language} />
                         </button>
                       ))}
                     </div>
@@ -1344,7 +1417,7 @@ export default function Translator() {
                           <div style={{ display: 'grid', gap: 4 }}>
                             {suggestions.map((s, k) => (
                               <button key={k} onClick={() => applySuggestion(s)} className="tr-suggestion">
-                                <span>{s}</span>
+                                <TText text={s} lang={language} />
                                 <ArrowUpRight size={14} />
                               </button>
                             ))}
@@ -1355,7 +1428,7 @@ export default function Translator() {
                       {inCall && peerSentence && (
                         <section className="card" style={{ padding: 14, borderColor: 'var(--blue-border)' }}>
                           <p className="section-label" style={{ color: 'var(--blue)', marginBottom: 8 }}>{peerName || 'Partner'} is signing</p>
-                          <p style={{ fontFamily: 'var(--font-serif)', fontSize: '1.35rem', lineHeight: 1.2 }}>{peerSentence}</p>
+                          <TText as="p" text={peerSentence} lang={language} style={{ fontFamily: language === 'en' ? 'var(--font-serif)' : undefined, fontSize: '1.35rem', lineHeight: 1.25 }} />
                         </section>
                       )}
                     </>
@@ -1382,7 +1455,7 @@ export default function Translator() {
                               background: me ? 'var(--accent)' : 'var(--bg-elevated)',
                               color: me ? 'var(--accent-ink)' : 'var(--text-primary)',
                               border: me ? 'none' : '1px solid var(--border)',
-                            }}>{msg.text}</p>
+                            }}><TText text={msg.text} lang={language} source="auto" /></p>
                           </motion.div>
                         );
                       })}
@@ -1422,8 +1495,10 @@ export default function Translator() {
         .tr-body { flex: 1; min-height: 0; display: flex; gap: 12px; padding: 14px clamp(12px, 2vw, 20px) clamp(12px, 2vw, 20px); }
         .tr-stage { flex: 1; min-width: 0; min-height: 420px; display: flex; align-items: center; justify-content: center; }
         .tr-caption {
-          position: absolute; left: 50%; transform: translateX(-50%); bottom: 92px; z-index: 20;
-          width: calc(100% - 40px); max-width: 780px; padding: 18px 22px; border-radius: 20px;
+          /* centred with margins, NOT translateX(-50%): the entry animation writes its own
+             transform, which used to drop the centring and push the caption off the stage */
+          position: absolute; left: 0; right: 0; margin: 0 auto; bottom: 92px; z-index: 20;
+          width: calc(100% - 40px); max-width: 780px; box-sizing: border-box; padding: 18px 22px; border-radius: 20px;
           background: rgba(11,10,9,0.58); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
           border: 1px solid var(--stage-border);
         }

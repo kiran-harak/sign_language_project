@@ -76,48 +76,63 @@ export function useWebcam() {
     return oc.toDataURL('image/jpeg', jpegQualityRef.current).split(',')[1]
   }, [])
 
-  const sendFrame = useCallback(async (base64) => {
+  // ── Pipelined /predict requests ──────────────────────────────────────────
+  // Over the internet each request takes ~300-600 ms, so waiting for one reply
+  // before sending the next capped detection at ~2 fps. Up to MAX_IN_FLIGHT
+  // frames are now in flight at once; out-of-order replies are dropped.
+  const MAX_IN_FLIGHT = 2
+  const inFlightRef   = useRef(0)
+  const seqRef        = useRef(0)
+  const appliedSeqRef = useRef(0)
+  const replyTimesRef = useRef([])
+
+  const sendFrame = useCallback(async (base64, seq) => {
+    const ctrl = new AbortController()
+    const timeout = setTimeout(() => ctrl.abort(), 6000) // a stuck request must not hold a slot
     try {
       const res = await fetch(`${API_URL}/predict`, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json", 
-  },
-  body: JSON.stringify({
-    image: base64,
-  }),
-});
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: base64 }),
+        signal: ctrl.signal,
+      })
       if (!res.ok) return
       const data = await res.json()
+      if (!isDetectingRef.current || seq <= appliedSeqRef.current) return // stale / stopped
+      appliedSeqRef.current = seq
+      const now = performance.now()
+      const times = replyTimesRef.current
+      times.push(now)
+      while (times.length && now - times[0] > 2000) times.shift()
+      setFps(Math.round(times.length / 2))
       setPrediction(data)
     } catch {
-      // silently skip — don't crash the detection loop
+      // network hiccup / timeout — skip this frame, keep the loop running
+    } finally {
+      clearTimeout(timeout)
     }
   }, [])
 
   // ── Detection loop via setTimeout (non-blocking, no rAF competition with WebRTC) ──
-  const detectionTick = useCallback(async () => {
+  const detectionTick = useCallback(() => {
     if (!isDetectingRef.current) return
-
-    const t0 = performance.now()
-    const frame = captureFrame()
-    if (frame) await sendFrame(frame)
-    const elapsed = performance.now() - t0
-
-    // Compute display FPS based on actual interval
-    const interval = frameIntervalRef.current
-    setFps(Math.min(Math.round(1000 / interval), Math.round(1000 / Math.max(elapsed, 1))))
-
-    // Schedule next tick — subtract processing time to stay on target
-    if (isDetectingRef.current) {
-      timerRef.current = setTimeout(detectionTick, Math.max(0, interval - elapsed))
+    if (inFlightRef.current < MAX_IN_FLIGHT) {
+      const frame = captureFrame()
+      if (frame) {
+        inFlightRef.current += 1
+        const seq = ++seqRef.current
+        sendFrame(frame, seq).finally(() => { inFlightRef.current = Math.max(0, inFlightRef.current - 1) })
+      }
     }
+    timerRef.current = setTimeout(detectionTick, frameIntervalRef.current)
   }, [captureFrame, sendFrame])
 
   const startDetection = useCallback(() => {
     if (!streamRef.current || isDetectingRef.current) return false
     isDetectingRef.current = true
     lastTickRef.current = 0
+    replyTimesRef.current = []
+    appliedSeqRef.current = seqRef.current
     setIsDetecting(true)
     detectionTick()   // kick off the loop
     return true
